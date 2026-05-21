@@ -4545,6 +4545,20 @@ async fn apply_command_result(
                         ));
                 }
             }
+            AppAction::OpenSkillPicker => {
+                if app.view_stack.top_kind() != Some(ModalKind::SkillPicker) {
+                    let skills: Vec<crate::tui::views::skill_picker::SkillRow> = app
+                        .cached_skills
+                        .iter()
+                        .map(|(name, desc)| crate::tui::views::skill_picker::SkillRow {
+                            name: name.clone(),
+                            description: desc.clone(),
+                        })
+                        .collect();
+                    app.view_stack
+                        .push(crate::tui::views::skill_picker::SkillPickerView::new(skills));
+                }
+            }
             AppAction::OpenStatusPicker => {
                 if app.view_stack.top_kind() != Some(ModalKind::StatusPicker) {
                     app.view_stack
@@ -5940,6 +5954,13 @@ async fn handle_view_events(
             }
             ViewEvent::ProviderPickerApiKeySubmitted { provider, api_key } => {
                 apply_provider_picker_api_key(app, engine_handle, config, provider, api_key).await;
+            }
+            ViewEvent::SkillPickerSelected { name } => {
+                // Insert `/skill <name> ` into the composer so the user can
+                // type their args before pressing Enter a second time.
+                let insertion = format!("/skill {name} ");
+                app.insert_str(&insertion);
+                app.status_message = Some(format!("Skill /{name} loaded — type your request"));
             }
             ViewEvent::ModeSelected { mode } => {
                 let msg = commands::switch_mode(app, mode);

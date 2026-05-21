@@ -8,7 +8,7 @@ use crate::skills::install::{
     self, DEFAULT_MAX_SIZE_BYTES, DEFAULT_REGISTRY_URL, InstallOutcome, InstallSource,
     RegistryFetchResult, SkillSyncOutcome, SyncResult, UpdateResult,
 };
-use crate::tui::app::App;
+use crate::tui::app::{App, AppAction};
 use crate::tui::history::HistoryCell;
 
 use super::CommandResult;
@@ -180,10 +180,10 @@ pub fn list_skills(app: &mut App, arg: Option<&str>) -> CommandResult {
 /// dispatches a sub-command (`install`, `update`, `uninstall`, `trust`).
 /// Try to run a skill by exact name (used for unified slash-command namespace, #435).
 /// Returns None when no skill with that name exists, so the caller can try other sources.
-pub fn run_skill_by_name(app: &mut App, name: &str, _arg: Option<&str>) -> Option<CommandResult> {
+pub fn run_skill_by_name(app: &mut App, name: &str, arg: Option<&str>) -> Option<CommandResult> {
     let registry = discover_visible_skills(app);
     if registry.get(name).is_some() {
-        Some(activate_skill(app, name))
+        Some(activate_skill(app, name, arg.filter(|a| !a.trim().is_empty())))
     } else {
         None
     }
@@ -191,12 +191,8 @@ pub fn run_skill_by_name(app: &mut App, name: &str, _arg: Option<&str>) -> Optio
 
 pub fn run_skill(app: &mut App, name: Option<&str>) -> CommandResult {
     let raw = match name {
-        Some(n) => n.trim(),
-        None => {
-            return CommandResult::error(
-                "Usage: /skill <name>\n\nSubcommands:\n  /skill install <github:owner/repo|https://…|<registry-name>>\n  /skill update <name>\n  /skill uninstall <name>\n  /skill trust <name>",
-            );
-        }
+        Some(n) if !n.trim().is_empty() => n.trim(),
+        _ => return CommandResult::action(AppAction::OpenSkillPicker),
     };
 
     // Sub-command dispatch happens before the activation path so users can't
@@ -212,10 +208,16 @@ pub fn run_skill(app: &mut App, name: Option<&str>) -> CommandResult {
         _ => {}
     }
 
-    activate_skill(app, raw)
+    // Split into skill name and optional args so `/skill <name> <args>`
+    // activates the skill and immediately submits the args.
+    let mut parts = raw.splitn(2, char::is_whitespace);
+    let skill_name = parts.next().unwrap_or("").trim();
+    let skill_args = parts.next().filter(|s| !s.trim().is_empty());
+
+    activate_skill(app, skill_name, skill_args)
 }
 
-fn activate_skill(app: &mut App, name: &str) -> CommandResult {
+fn activate_skill(app: &mut App, name: &str, args: Option<&str>) -> CommandResult {
     // `/skill new` is a friendly alias for `/skill skill-creator`.
     let name = if name == "new" { "skill-creator" } else { name };
 
@@ -230,6 +232,26 @@ fn activate_skill(app: &mut App, name: &str) -> CommandResult {
         app.add_message(HistoryCell::System {
             content: format!("Activated skill: {}\n\n{}", skill.name, skill.description),
         });
+
+        if let Some(args) = args {
+            let trimmed = args.trim();
+            if !trimmed.is_empty() {
+                // Args provided: set the skill instruction and use SendMessage
+                // action so the main loop dispatches the args as a user message
+                // with the skill instruction wrapped around it. This avoids the
+                // "pending inputs" stall that manual queue_message would cause
+                // (the command handler runs inside the event loop, not on the
+                // message dispatch path).
+                app.active_skill = Some(instruction);
+                return CommandResult::with_message_and_action(
+                    format!(
+                        "Skill '{}' activated with args.\n\n{}",
+                        skill.name, skill.description
+                    ),
+                    AppAction::SendMessage(trimmed.to_string()),
+                );
+            }
+        }
 
         app.active_skill = Some(instruction);
 
@@ -953,13 +975,18 @@ mod tests {
     }
 
     #[test]
-    fn test_run_skill_without_name() {
+    fn test_run_skill_without_name_opens_picker() {
         let tmpdir = TempDir::new().unwrap();
         let _home = IsolatedHome::new(&tmpdir);
         let mut app = create_test_app_with_tmpdir(&tmpdir);
         let result = run_skill(&mut app, None);
-        assert!(result.message.is_some());
-        assert!(result.message.unwrap().contains("Usage: /skill"));
+        // No name → should return OpenSkillPicker action (no error message).
+        assert!(result.message.is_none(), "should not have error message");
+        assert!(
+            matches!(result.action, Some(AppAction::OpenSkillPicker)),
+            "should return OpenSkillPicker action, got {:?}",
+            result.action
+        );
     }
 
     #[test]
@@ -990,5 +1017,79 @@ mod tests {
         assert!(msg.contains("A test skill"));
         assert!(app.active_skill.is_some());
         assert!(!app.history.is_empty());
+    }
+
+    #[test]
+    fn test_run_skill_with_args_returns_action() {
+        let tmpdir = TempDir::new().unwrap();
+        let _home = IsolatedHome::new(&tmpdir);
+        create_skill_dir(
+            &tmpdir,
+            "test-skill",
+            "---\nname: test-skill\ndescription: A test skill\n---\nDo something special",
+        );
+        let mut app = create_test_app_with_tmpdir(&tmpdir);
+        let result = run_skill(&mut app, Some("test-skill 贪吃蛇游戏"));
+
+        // Should have both a message and an action
+        assert!(result.message.is_some());
+        assert!(result.action.is_some());
+        let msg = result.message.unwrap();
+        assert!(msg.contains("activated with args"), "got: {msg}");
+
+        // active_skill should be set (SendMessage action picks it up)
+        assert!(
+            app.active_skill.is_some(),
+            "active_skill must be set for SendMessage to consume"
+        );
+        assert!(!app.history.is_empty());
+    }
+
+    #[test]
+    fn test_run_skill_without_args_no_action() {
+        let tmpdir = TempDir::new().unwrap();
+        let _home = IsolatedHome::new(&tmpdir);
+        create_skill_dir(
+            &tmpdir,
+            "test-skill",
+            "---\nname: test-skill\ndescription: A test skill\n---\nDo something special",
+        );
+        let mut app = create_test_app_with_tmpdir(&tmpdir);
+        let result = run_skill(&mut app, Some("test-skill"));
+
+        // Without args, should just be a message, no action
+        assert!(result.message.is_some());
+        assert!(result.action.is_none(), "no args should not trigger action");
+        assert!(app.active_skill.is_some());
+    }
+
+    #[test]
+    fn test_run_skill_by_name_with_args() {
+        let tmpdir = TempDir::new().unwrap();
+        let _home = IsolatedHome::new(&tmpdir);
+        create_skill_dir(
+            &tmpdir,
+            "arg-skill",
+            "---\nname: arg-skill\ndescription: Skill with args\n---\nProcess args",
+        );
+        let mut app = create_test_app_with_tmpdir(&tmpdir);
+        let result = run_skill_by_name(
+            &mut app,
+            "arg-skill",
+            Some("hello world"),
+        );
+        assert!(result.is_some());
+        let result = result.unwrap();
+        assert!(result.message.is_some());
+        assert!(
+            result.action.is_some(),
+            "with args should trigger SendMessage action"
+        );
+        let msg = result.message.unwrap();
+        assert!(msg.contains("activated with args"), "got: {msg}");
+        assert!(
+            app.active_skill.is_some(),
+            "active_skill must be set for SendMessage to consume"
+        );
     }
 }

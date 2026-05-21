@@ -14,6 +14,7 @@ use crate::tui::history::{HistoryCell, SubAgentCell, summarize_tool_output};
 use crate::tui::widgets::agent_card::AgentLifecycle;
 
 pub mod mode_picker;
+pub mod skill_picker;
 pub mod status_picker;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -33,6 +34,7 @@ pub enum ModalKind {
     ProviderPicker,
     ModePicker,
     FilePicker,
+    SkillPicker,
     StatusPicker,
     FeedbackPicker,
     ThemePicker,
@@ -155,6 +157,10 @@ pub enum ViewEvent {
     ProviderPickerApiKeySubmitted {
         provider: crate::config::ApiProvider,
         api_key: String,
+    },
+    /// Emitted by the `/skill` picker when the user selects a skill.
+    SkillPickerSelected {
+        name: String,
     },
     /// Emitted by the `/mode` picker when the user chooses a mode.
     ModeSelected {

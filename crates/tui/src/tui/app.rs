@@ -4079,6 +4079,8 @@ pub enum AppAction {
     OpenProviderPicker,
     /// Open the `/mode` picker modal for Agent / Plan / YOLO.
     OpenModePicker,
+    /// Open the `/skill` picker modal to select a skill by name.
+    OpenSkillPicker,
     /// Open the `/statusline` multi-select picker for footer items.
     OpenStatusPicker,
     /// Open the `/feedback` picker for GitHub issue/security destinations.
